@@ -46,6 +46,26 @@ Governed biomedical GraphRAG must go further:
 
 This build is designed to reduce hallucination risk by forcing generated biomedical claims to pass through validation before being returned.
 
+## Ontology-first design
+
+This build treats biomedical RAG as an ontology-governed evidence workflow, not as a document search problem.
+
+The system models the following as first-class objects:
+
+- drugs
+- ingredients
+- label sections
+- warnings
+- contraindications
+- adverse reactions
+- PubMed articles
+- evidence claims
+- validation results
+- safety decisions
+- audit records
+
+This makes the graph more than a visualization layer. The ontology becomes the control plane for retrieval, generation, validation, safety, and audit.
+
 ### System type
 
 This is:

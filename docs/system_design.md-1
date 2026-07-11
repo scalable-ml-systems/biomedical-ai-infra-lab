@@ -1,0 +1,967 @@
+# System Design — Governed Biomedical GraphRAG Pipeline with Evidence Contracts
+
+## Build
+
+**Build 1 — Governed Biomedical GraphRAG Pipeline with Evidence Contracts**
+
+Public title:
+
+**Medical RAG Is Broken Without Evidence Contracts**
+
+---
+
+## 1. System purpose
+
+This system answers safe biomedical evidence questions using public biomedical sources only.
+
+The goal is not to build a medical chatbot.
+
+The goal is to demonstrate how a biomedical AI system should be governed:
+
+* normalize biomedical entities before retrieval
+* retrieve evidence from public trusted sources
+* combine vector retrieval with graph relationship lookup
+* generate answers using retrieved evidence only
+* validate claims against sources
+* validate relationships against the graph
+* block personal medical advice
+* store an audit trail for every response
+
+The LLM is not treated as the system of record.
+
+The system of record is:
+
+```text
+retrieved evidence
+graph relationships
+evidence contracts
+validation results
+safety results
+audit logs
+```
+
+---
+
+## 2. High-level architecture
+
+```mermaid
+flowchart TD
+    User["User<br/>Safe biomedical evidence question"] --> UI["Streamlit Evidence Trace UI"]
+
+    UI --> API["FastAPI Backend<br/>POST /query"]
+
+    API --> Classifier["Query Classifier<br/>safe evidence question?<br/>medical advice?"]
+    Classifier --> SafetyPrecheck["Safety Pre-Check"]
+
+    SafetyPrecheck -->|Blocked personal advice| Refusal["Safe Refusal Response<br/>Redirect to public evidence summary"]
+    SafetyPrecheck -->|Allowed evidence query| Extractor["Drug / Entity Extractor"]
+
+    Extractor --> Normalizer["RxNorm Normalizer<br/>brand/generic/name mapping"]
+
+    Normalizer --> Retriever["Hybrid Evidence Retriever"]
+
+    Retriever --> DailyMed["DailyMed Retriever<br/>drug label sections"]
+    Retriever --> PubMed["PubMed Retriever<br/>literature abstracts"]
+    Retriever --> VectorStore["Vector Retriever<br/>semantic evidence chunks"]
+    Retriever --> GraphDB["Neo4j Graph Retriever<br/>drug relationships"]
+
+    DailyMed --> EvidenceBundle["Evidence Bundle Builder"]
+    PubMed --> EvidenceBundle
+    VectorStore --> EvidenceBundle
+    GraphDB --> EvidenceBundle
+
+    EvidenceBundle --> Generator["External LLM Generator<br/>structured answer only"]
+
+    Generator --> EvidenceContract["Evidence Contract Builder<br/>claims + citations + graph paths"]
+
+    EvidenceContract --> CitationValidator["Citation Validator"]
+    CitationValidator --> ClaimValidator["Claim Validator"]
+    ClaimValidator --> GraphValidator["Graph Consistency Validator"]
+    GraphValidator --> SafetyFinal["Final Safety Checker"]
+
+    SafetyFinal --> AuditLogger["Audit Logger<br/>query, evidence, claims,<br/>validation, safety, response"]
+
+    AuditLogger --> Response["Structured Response<br/>answer + citations + validation + audit_id"]
+
+    Response --> UI
+```
+
+---
+
+## 3. Core design principle
+
+The system should not trust generated text by default.
+
+Every answer must pass through this governance path:
+
+```text
+question
+  → classification
+  → safety pre-check
+  → entity normalization
+  → evidence retrieval
+  → graph lookup
+  → answer generation
+  → citation validation
+  → claim validation
+  → graph validation
+  → final safety check
+  → audit logging
+  → response
+```
+
+If a claim cannot be validated, it should not be presented as a supported biomedical claim.
+
+---
+
+## 4. Trust boundary diagram
+
+```mermaid
+flowchart LR
+    subgraph UserZone["User Zone"]
+        User["User Question"]
+        UI["Streamlit UI"]
+    end
+
+    subgraph AppZone["Application Control Plane"]
+        API["FastAPI"]
+        Classifier["Query Classifier"]
+        Safety["Safety Policy"]
+        Normalizer["RxNorm Normalizer"]
+        Retriever["Hybrid Retriever"]
+        Generator["LLM Generation Wrapper"]
+        Validators["Validators"]
+        Audit["Audit Logger"]
+    end
+
+    subgraph PublicSources["Public Biomedical Sources"]
+        DailyMed["DailyMed"]
+        RxNorm["RxNorm / RxNav"]
+        PubMed["PubMed / NCBI"]
+    end
+
+    subgraph LocalStores["Local Stores"]
+        Vector["Vector Store"]
+        Graph["Neo4j Graph"]
+        AuditDB["Audit DB"]
+        Cache["Cached Source Files"]
+    end
+
+    subgraph ExternalLLM["External LLM Boundary"]
+        LLM["External LLM API"]
+    end
+
+    User --> UI --> API
+    API --> Classifier --> Safety
+    Safety --> Normalizer
+    Normalizer --> RxNorm
+    Safety --> Retriever
+    Retriever --> DailyMed
+    Retriever --> PubMed
+    Retriever --> Vector
+    Retriever --> Graph
+    DailyMed --> Cache
+    PubMed --> Cache
+    Retriever --> Generator
+    Generator --> LLM
+    LLM --> Generator
+    Generator --> Validators
+    Validators --> Audit
+    Audit --> AuditDB
+    Audit --> UI
+```
+
+---
+
+## 5. Request lifecycle
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant UI as Streamlit UI
+    participant API as FastAPI /query
+    participant Safety as Safety Checker
+    participant Rx as RxNorm Normalizer
+    participant R as Hybrid Retriever
+    participant G as Graph Retriever
+    participant LLM as External LLM
+    participant V as Validators
+    participant A as Audit Logger
+
+    User->>UI: Ask biomedical evidence question
+    UI->>API: POST /query
+    API->>Safety: Classify and safety pre-check
+
+    alt Personal medical advice
+        Safety-->>API: Block request
+        API-->>UI: Safe refusal + redirect
+        UI-->>User: Refusal response
+    else Safe evidence question
+        Safety->>Rx: Normalize drug entities
+        Rx-->>API: Normalized drug IDs and names
+        API->>R: Retrieve label/literature/vector evidence
+        R->>G: Retrieve graph relationships
+        G-->>R: Graph paths
+        R-->>API: Evidence bundle
+        API->>LLM: Generate structured answer from evidence only
+        LLM-->>API: Draft answer + claims
+        API->>V: Validate citations, claims, graph consistency, safety
+        V-->>API: Validation results
+        API->>A: Store audit record
+        A-->>API: audit_id
+        API-->>UI: Structured response
+        UI-->>User: Answer + evidence trace
+    end
+```
+
+---
+
+## 6. Component responsibilities
+
+### 6.1 Streamlit Evidence Trace UI
+
+The UI is responsible for making the internal governance path visible.
+
+It should display:
+
+* original user question
+* safety classification
+* normalized drug entities
+* retrieved DailyMed sections
+* retrieved PubMed abstracts
+* graph paths
+* generated claims
+* claim-source mapping
+* validation status
+* safety result
+* audit ID
+
+The UI should make it obvious that the answer is an evidence summary, not medical advice.
+
+---
+
+### 6.2 FastAPI backend
+
+The backend coordinates the full request lifecycle.
+
+Initial endpoints:
+
+```text
+GET /health
+POST /query
+```
+
+Planned endpoints:
+
+```text
+GET /drugs
+GET /audit/{audit_id}
+GET /graph/{drug_name}
+```
+
+The backend should remain thin.
+
+Business logic should live in named modules:
+
+```text
+classification
+normalization
+retrieval
+graph
+generation
+validation
+safety
+audit
+```
+
+---
+
+### 6.3 Query classifier
+
+The classifier determines what kind of query the user asked.
+
+Initial query classes:
+
+```text
+label_summary
+warning_question
+contraindication_question
+adverse_reaction_question
+drug_interaction_evidence_question
+pubmed_literature_question
+multi_hop_evidence_question
+personal_medical_advice
+out_of_scope
+```
+
+The most important early behavior is blocking personal medical advice before retrieval and generation.
+
+---
+
+### 6.4 Safety checker
+
+The safety checker runs twice:
+
+```text
+1. before retrieval and generation
+2. after generation before response
+```
+
+The first check blocks obviously unsafe questions.
+
+The final check catches unsafe language that may appear in the generated answer.
+
+Blocked examples:
+
+```text
+Should I take this medication?
+Should I stop taking this medication?
+What dose should I take?
+Can I combine these two medications?
+Is this drug safe for me?
+Is my symptom caused by this drug?
+```
+
+Safe redirect example:
+
+```text
+I cannot provide personal medical advice or determine whether a medication is appropriate for you. I can summarize what public drug labels and biomedical literature say, but you should consult a qualified healthcare professional for personal decisions.
+```
+
+---
+
+### 6.5 Drug/entity extractor
+
+The entity extractor identifies biomedical entities in the query.
+
+MVP entities:
+
+```text
+drug names
+brand names
+generic names
+risk terms
+label section terms
+population terms
+```
+
+Initial controlled drug set:
+
+```text
+metformin
+warfarin
+atorvastatin
+semaglutide
+ibuprofen
+acetaminophen
+amoxicillin
+lisinopril
+```
+
+---
+
+### 6.6 RxNorm normalizer
+
+The normalizer maps user-provided names to normalized drug concepts.
+
+Examples:
+
+```text
+Tylenol       → acetaminophen
+Advil         → ibuprofen
+Glucophage    → metformin
+Coumadin      → warfarin
+```
+
+The normalized entity should include:
+
+```text
+original_text
+normalized_name
+rxnorm_id
+entity_type
+confidence
+```
+
+---
+
+### 6.7 Hybrid evidence retriever
+
+The hybrid retriever collects evidence from several sources.
+
+```mermaid
+flowchart TD
+    Query["Normalized Query"] --> Hybrid["Hybrid Evidence Retriever"]
+
+    Hybrid --> Label["DailyMed Label Retrieval"]
+    Hybrid --> Lit["PubMed Literature Retrieval"]
+    Hybrid --> Vector["Vector Similarity Search"]
+    Hybrid --> Graph["Graph Relationship Lookup"]
+
+    Label --> Bundle["Evidence Bundle"]
+    Lit --> Bundle
+    Vector --> Bundle
+    Graph --> Bundle
+```
+
+The retriever should return an evidence bundle, not free text.
+
+---
+
+### 6.8 DailyMed retriever
+
+The DailyMed retriever fetches public label sections.
+
+Important sections:
+
+```text
+warnings and precautions
+contraindications
+adverse reactions
+drug interactions
+use in specific populations
+boxed warning
+```
+
+The system may retrieve dosage sections for completeness, but it must not provide personal dosing guidance.
+
+---
+
+### 6.9 PubMed retriever
+
+The PubMed retriever fetches public literature metadata and abstracts.
+
+It should return:
+
+```text
+PMID
+title
+abstract
+journal
+publication year
+query used
+source URL or source identifier
+```
+
+PubMed evidence should be summarized cautiously.
+
+The system should not overstate literature findings.
+
+---
+
+### 6.10 Vector retriever
+
+The vector retriever finds semantically relevant chunks from cached label and literature text.
+
+MVP store:
+
+```text
+Chroma
+```
+
+Later option:
+
+```text
+Postgres + pgvector
+```
+
+The vector retriever helps find relevant passages, but it is not enough by itself.
+
+That is why the graph and validators exist.
+
+---
+
+### 6.11 Neo4j graph retriever
+
+The graph retriever validates relationships between biomedical entities.
+
+Example graph path:
+
+```text
+Drug(warfarin)
+  -[:HAS_WARNING]->
+Warning(bleeding risk)
+  -[:SUPPORTED_BY]->
+LabelSection(warnings and precautions)
+```
+
+The graph should help answer:
+
+```text
+Which warning is connected to this drug?
+Which label section supports this warning?
+Which PubMed article discusses this concept?
+Which two drugs are connected through an interaction or shared risk?
+```
+
+---
+
+### 6.12 External LLM generator
+
+The LLM generator receives an evidence bundle and must return structured output.
+
+The LLM should not decide whether a claim is valid.
+
+It only drafts an answer and claim list.
+
+Validation happens after generation.
+
+Required behavior:
+
+```text
+use retrieved evidence only
+do not provide personal medical advice
+return structured claims
+include source references
+express uncertainty when evidence is insufficient
+```
+
+---
+
+### 6.13 Evidence contract builder
+
+The evidence contract turns generated output into auditable structured records.
+
+```mermaid
+flowchart TD
+    Draft["Generated Draft Answer"] --> Claims["Extract Claims"]
+    Claims --> Sources["Map Claims to Source IDs"]
+    Sources --> GraphPaths["Attach Graph Path IDs"]
+    GraphPaths --> Contract["Evidence Contract"]
+    Contract --> Validators["Validation Pipeline"]
+```
+
+Each claim should include:
+
+```text
+claim_text
+claim_type
+drug_entities
+relationship_type
+supporting_source_ids
+graph_path_ids
+allowed_strength
+validation_status
+```
+
+---
+
+### 6.14 Validators
+
+The validation subsystem checks whether the answer is safe and supported.
+
+Validators:
+
+```text
+citation validator
+claim validator
+graph consistency validator
+safety validator
+```
+
+Validation states:
+
+```text
+supported
+partially_supported
+unsupported
+conflicting
+not_checked
+```
+
+If a claim is unsupported, the system should either remove it, mark it clearly, or return an insufficient-evidence response.
+
+---
+
+### 6.15 Audit logger
+
+The audit logger stores the full response trace.
+
+Audit record should include:
+
+```text
+audit_id
+timestamp
+user_query
+query_classification
+normalized_entities
+retrieved_sources
+graph_paths
+generated_claims
+validation_results
+safety_result
+final_answer
+```
+
+The audit log is what turns this from a demo chatbot into an inspectable governed system.
+
+---
+
+## 7. Data flow
+
+```mermaid
+flowchart TD
+    Q["User Query"] --> QR["QueryRequest"]
+
+    QR --> QC["QueryClassification"]
+    QC --> SR1["SafetyPolicyResult"]
+
+    SR1 -->|allowed| NE["NormalizedEntity[]"]
+    SR1 -->|blocked| BR["BlockedResponse"]
+
+    NE --> LS["DrugLabelSection[]"]
+    NE --> PE["PubMedEvidence[]"]
+    NE --> GP["GraphPath[]"]
+    NE --> VC["VectorChunk[]"]
+
+    LS --> EB["EvidenceBundle"]
+    PE --> EB
+    GP --> EB
+    VC --> EB
+
+    EB --> GA["GeneratedAnswer"]
+    GA --> EC["EvidenceClaim[]"]
+
+    EC --> VR["ValidationResult"]
+    GP --> VR
+    EB --> VR
+
+    VR --> SR2["Final SafetyPolicyResult"]
+
+    SR2 --> AR["AuditRecord"]
+    AR --> RESP["QueryResponse"]
+```
+
+---
+
+## 8. Graph schema
+
+```mermaid
+erDiagram
+    Drug ||--o{ Ingredient : HAS_INGREDIENT
+    Drug ||--o{ BrandName : HAS_BRAND_NAME
+    Drug ||--o{ LabelSection : HAS_LABEL_SECTION
+    Drug ||--o{ Warning : HAS_WARNING
+    Drug ||--o{ Contraindication : HAS_CONTRAINDICATION
+    Drug ||--o{ AdverseReaction : HAS_ADVERSE_REACTION
+    Drug ||--o{ DrugInteraction : HAS_INTERACTION
+    Drug ||--o{ Population : HAS_POPULATION_WARNING
+    PubMedArticle ||--o{ Warning : DISCUSSES
+    EvidenceClaim ||--o{ LabelSection : SUPPORTED_BY
+    EvidenceClaim ||--o{ PubMedArticle : SUPPORTED_BY
+    EvidenceClaim ||--o{ Drug : HAS_GRAPH_PATH
+```
+
+Node types:
+
+```text
+Drug
+Ingredient
+BrandName
+LabelSection
+Warning
+Contraindication
+AdverseReaction
+DrugInteraction
+Population
+PubMedArticle
+EvidenceClaim
+```
+
+Relationship types:
+
+```text
+HAS_INGREDIENT
+HAS_BRAND_NAME
+HAS_LABEL_SECTION
+HAS_WARNING
+HAS_CONTRAINDICATION
+HAS_ADVERSE_REACTION
+HAS_INTERACTION
+HAS_POPULATION_WARNING
+DISCUSSES
+SUPPORTED_BY
+HAS_GRAPH_PATH
+```
+
+---
+
+## 9. Evidence contract structure
+
+```mermaid
+classDiagram
+    class GeneratedAnswer {
+        string answer_text
+        EvidenceClaim[] claims
+        Citation[] citations
+        ValidationResult validation_result
+        SafetyPolicyResult safety_result
+        string audit_id
+    }
+
+    class EvidenceClaim {
+        string claim_text
+        string claim_type
+        string[] drug_entities
+        string relationship_type
+        string[] supporting_source_ids
+        string[] graph_path_ids
+        string allowed_strength
+        string validation_status
+    }
+
+    class Citation {
+        string source_id
+        string source_type
+        string title
+        string section
+        string url
+    }
+
+    class ValidationResult {
+        string status
+        string[] supported_claim_ids
+        string[] unsupported_claim_ids
+        string[] warnings
+    }
+
+    class SafetyPolicyResult {
+        bool allowed
+        string reason
+        string response_mode
+    }
+
+    GeneratedAnswer --> EvidenceClaim
+    GeneratedAnswer --> Citation
+    GeneratedAnswer --> ValidationResult
+    GeneratedAnswer --> SafetyPolicyResult
+```
+
+---
+
+## 10. Runtime paths
+
+### Safe evidence query
+
+```text
+User asks:
+"What does the official label say about warnings for warfarin?"
+
+System path:
+1. Classify as warning_question.
+2. Safety pre-check allows the query.
+3. Extract warfarin.
+4. Normalize through RxNorm.
+5. Retrieve DailyMed warning sections.
+6. Retrieve optional PubMed evidence.
+7. Retrieve graph warning relationships.
+8. Build evidence bundle.
+9. Generate structured answer.
+10. Validate claims and citations.
+11. Validate graph paths.
+12. Run final safety check.
+13. Store audit record.
+14. Return answer with evidence trace.
+```
+
+---
+
+### Blocked personal advice query
+
+```text
+User asks:
+"Should I take warfarin with ibuprofen?"
+
+System path:
+1. Classify as personal_medical_advice.
+2. Safety pre-check blocks the advice request.
+3. Return refusal.
+4. Offer safe redirect to public label/literature summary.
+5. Store audit record.
+```
+
+Expected behavior:
+
+```text
+I cannot provide personal medical advice or determine whether medications are appropriate for you. I can summarize what public drug labels and biomedical literature say about warfarin, NSAID-class medications, and bleeding-related warnings.
+```
+
+---
+
+### Multi-hop GraphRAG query
+
+```text
+User asks:
+"What label warnings and PubMed evidence discuss bleeding risk with warfarin and ibuprofen?"
+
+System path:
+1. Classify as multi_hop_evidence_question.
+2. Safety pre-check allows evidence summary but blocks personal advice.
+3. Extract warfarin, ibuprofen, and bleeding risk.
+4. Normalize drugs through RxNorm.
+5. Retrieve DailyMed label sections for both drugs.
+6. Retrieve PubMed abstracts about relevant concepts.
+7. Query graph for drug-warning-risk relationships.
+8. Build evidence bundle.
+9. Generate answer using evidence only.
+10. Validate claim-source support.
+11. Validate graph relationship support.
+12. Run final safety check.
+13. Store audit trace.
+14. Return answer and evidence map.
+```
+
+---
+
+## 11. Failure-mode design
+
+| Failure mode               | Example                                    | Mitigation                              |
+| -------------------------- | ------------------------------------------ | --------------------------------------- |
+| Unsafe advice              | “Should I take this?”                      | safety pre-check and final safety check |
+| Unsupported claim          | LLM invents relationship                   | claim-source validation                 |
+| Citation laundering        | cited source does not support claim        | citation validator                      |
+| Graph mismatch             | answer claims unsupported relationship     | graph consistency validator             |
+| Insufficient evidence      | system answers confidently without support | evidence sufficiency check              |
+| Entity normalization error | brand mapped to wrong generic              | RxNorm normalization and confidence     |
+| Retrieval failure          | PubMed or DailyMed unavailable             | retries, caching, audit error states    |
+| Overstated literature      | abstract treated as clinical guidance      | conservative answer policy              |
+| Missing audit trace        | response cannot be inspected later         | audit required before final response    |
+
+---
+
+## 12. MVP deployment shape
+
+For the MVP, all services run locally.
+
+```mermaid
+flowchart TD
+    Browser["Browser"] --> Streamlit["Streamlit<br/>localhost:8501"]
+    Streamlit --> FastAPI["FastAPI<br/>localhost:8000"]
+
+    FastAPI --> Env[".env Settings"]
+    FastAPI --> Cache["Cached Source Files"]
+    FastAPI --> Chroma["Chroma Vector Store"]
+    FastAPI --> Neo4j["Neo4j<br/>localhost:7474 / 7687"]
+    FastAPI --> AuditDB["DuckDB / SQLite Audit DB"]
+    FastAPI --> LLM["External LLM API"]
+
+    FastAPI --> DailyMed["DailyMed API"]
+    FastAPI --> RxNav["RxNav API"]
+    FastAPI --> PubMed["NCBI E-utilities"]
+```
+
+MVP local services:
+
+```text
+FastAPI backend
+Streamlit frontend
+Neo4j graph database
+local vector store
+local audit database
+cached source files
+external LLM API
+public biomedical APIs
+```
+
+---
+
+## 13. Folder mapping
+
+```text
+builds/001-governed-biomedical-graphrag/
+  app/
+    api/
+      health_api.py
+      query_api.py
+
+    config/
+      settings.py
+
+    contracts/
+      query_contracts.py
+      evidence_contracts.py
+      validation_contracts.py
+      audit_contracts.py
+
+    retrieval/
+      rxnorm_client.py
+      dailymed_client.py
+      pubmed_client.py
+      vector_retriever.py
+      hybrid_retriever.py
+
+    graph/
+      graph_client.py
+      graph_schema.py
+      graph_seed_loader.py
+
+    generation/
+      llm_answer_generator.py
+
+    validation/
+      citation_validator.py
+      claim_validator.py
+      graph_consistency_validator.py
+      safety_checker.py
+
+    audit/
+      audit_logger.py
+
+    dashboard/
+      streamlit_app.py
+
+  data/
+    cached_sources/
+      dailymed/
+      pubmed/
+    graph_seed/
+
+  evals/
+
+  tests/
+```
+
+---
+
+## 14. Definition of done for the system
+
+The system is complete enough for the first public demo when it can:
+
+```text
+1. Accept a safe biomedical evidence question.
+2. Block personal medical advice questions.
+3. Normalize at least the controlled MVP drug set.
+4. Retrieve DailyMed evidence.
+5. Retrieve PubMed evidence.
+6. Build an evidence bundle.
+7. Generate a structured answer.
+8. Create claim-level evidence contracts.
+9. Validate claims against retrieved sources.
+10. Validate graph relationships.
+11. Store an audit record.
+12. Display the full evidence trace in Streamlit.
+```
+
+---
+
+## 15. Final positioning
+
+This build demonstrates biomedical AI infrastructure maturity.
+
+The important point is not that an LLM can answer a drug question.
+
+The important point is that the system can show:
+
+```text
+what it retrieved
+what it normalized
+what it claimed
+what supported each claim
+what graph path was used
+what validation passed or failed
+what safety boundary was enforced
+what audit record was created
+```
+
+That is the difference between a generic RAG demo and a governed biomedical AI system.
+
