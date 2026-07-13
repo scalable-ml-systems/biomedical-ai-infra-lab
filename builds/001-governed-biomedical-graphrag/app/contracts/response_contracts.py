@@ -1,0 +1,1 @@
+"""Structured API response contracts."""
