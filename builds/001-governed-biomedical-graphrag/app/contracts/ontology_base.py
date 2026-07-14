@@ -40,11 +40,15 @@ class OntologyObjectType(StrEnum):
     GRAPH_PATH = "graph_path"
 
     SYSTEM_ACTION = "system_action"
+    GENERATED_ANSWER = "generated_answer"
+    EVIDENCE_BUNDLE = "evidence_bundle"
     EVIDENCE_CLAIM = "evidence_claim"
     EVIDENCE_CONTRACT = "evidence_contract"
     VALIDATION_RESULT = "validation_result"
     SAFETY_DECISION = "safety_decision"
     REFUSAL_RESPONSE = "refusal_response"
+    AUDIT_EVENT = "audit_event"
+    AUDIT_TRACE = "audit_trace"
     AUDIT_RECORD = "audit_record"
 
 
